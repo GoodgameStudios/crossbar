@@ -2,8 +2,8 @@
 *.pyo
 *.dat
 *.sublime-workspace
-crossbar/build
-crossbar/dist
+build
+dist
 *.egg-info
 *.log
 *.pid
