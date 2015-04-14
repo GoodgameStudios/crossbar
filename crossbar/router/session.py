@@ -554,223 +554,27 @@ class CrossbarRouterSession(RouterSession):
                             # "WAMP-Challenge-Response" authentication
                             #
                             if authmethod == u"wampcra":
-                                cfg = self._transport_config['auth']['wampcra']
-
-                                if cfg['type'] == 'static':
-
-                                    if details.authid in cfg.get('users', {}):
-
-                                        user = cfg['users'][details.authid]
-
-                                        # the authid the session will be authenticated as is from the user data, or when
-                                        # the user data doesn't contain an authid, from the HELLO message the client sent
-                                        #
-                                        authid = user.get("authid", details.authid)
-
-                                        # construct a pending WAMP-CRA authentication
-                                        #
-                                        self._pending_auth = PendingAuthWampCra(details.pending_session,
-                                                                                authid,
-                                                                                user['role'],
-                                                                                u'static',
-                                                                                user['secret'].encode('utf8'))
-
-                                        # send challenge to client
-                                        #
-                                        extra = {
-                                            u'challenge': self._pending_auth.challenge
-                                        }
-
-                                        # when using salted passwords, provide the client with
-                                        # the salt and then PBKDF2 parameters used
-                                        #
-                                        if 'salt' in user:
-                                            extra[u'salt'] = user['salt']
-                                            extra[u'iterations'] = user.get('iterations', 1000)
-                                            extra[u'keylen'] = user.get('keylen', 32)
-
-                                        return types.Challenge(u'wampcra', extra)
-
-                                    else:
-                                        return types.Deny(message="no user with authid '{}' in user database".format(details.authid))
-
-                                elif cfg['type'] == 'dynamic':
-
-                                    # call the configured dynamic authenticator procedure
-                                    # via the router's service session
-                                    #
-                                    service_session = self._router_factory.get(realm)._realm.session
-                                    session_details = {
-                                        # forward transport level details of the WAMP session that
-                                        # wishes to authenticate
-                                        'transport': self._transport._transport_info,
-
-                                        # the following WAMP session ID will be assigned to the session
-                                        # if (and only if) the subsequent authentication succeeds.
-                                        'session': self._pending_session_id
-                                    }
-                                    d = service_session.call(cfg['authenticator'], realm, details.authid, session_details)
-
-                                    def on_authenticate_ok(user):
-
-                                        # the authid the session will be authenticated as is from the dynamic
-                                        # authenticator response, or when the response doesn't contain an authid,
-                                        # from the HELLO message the client sent
-                                        #
-                                        authid = user.get("authid", details.authid)
-
-                                        # construct a pending WAMP-CRA authentication
-                                        #
-                                        self._pending_auth = PendingAuthWampCra(details.pending_session,
-                                                                                authid,
-                                                                                user['role'],
-                                                                                u'dynamic',
-                                                                                user['secret'].encode('utf8'))
-
-                                        # send challenge to client
-                                        #
-                                        extra = {
-                                            u'challenge': self._pending_auth.challenge
-                                        }
-
-                                        # when using salted passwords, provide the client with
-                                        # the salt and the PBKDF2 parameters used
-                                        #
-                                        if 'salt' in user:
-                                            extra[u'salt'] = user['salt']
-                                            extra[u'iterations'] = user.get('iterations', 1000)
-                                            extra[u'keylen'] = user.get('keylen', 32)
-
-                                        return types.Challenge(u'wampcra', extra)
-
-                                    def on_authenticate_error(err):
-
-                                        error = None
-                                        message = "dynamic WAMP-CRA credential getter failed: {}".format(err)
-
-                                        if isinstance(err.value, ApplicationError):
-                                            error = err.value.error
-                                            if err.value.args and len(err.value.args):
-                                                message = str(err.value.args[0])  # exception does not need to contain a string
-
-                                        return types.Deny(error, message)
-
-                                    d.addCallbacks(on_authenticate_ok, on_authenticate_error)
-
-                                    return d
-
-                                else:
-
-                                    return types.Deny(message="illegal WAMP-CRA authentication config (type '{0}' is unknown)".format(cfg['type']))
+                                return self.challengeWithWAMPCRA( details )
 
                             # WAMP-Ticket authentication
                             #
                             elif authmethod == u"ticket":
-                                cfg = self._transport_config['auth']['ticket']
-
-                                # use static principal database from configuration
-                                #
-                                if cfg['type'] == 'static':
-
-                                    if details.authid in cfg.get('principals', {}):
-
-                                        principal = cfg['principals'][details.authid]
-
-                                        # the authid the session will be authenticated as is from the principal data, or when
-                                        # the principal data doesn't contain an authid, from the HELLO message the client sent
-                                        #
-                                        authid = principal.get("authid", details.authid)
-
-                                        self._pending_auth = PendingAuthTicket(realm,
-                                                                               authid,
-                                                                               principal['role'],
-                                                                               u'static',
-                                                                               principal['ticket'].encode('utf8'))
-
-                                        return types.Challenge(u'ticket')
-                                    else:
-                                        return types.Deny(message="no principal with authid '{}' in principal database".format(details.authid))
-
-                                # use configured procedure to dynamically get a ticket for the principal
-                                #
-                                elif cfg['type'] == 'dynamic':
-
-                                    self._pending_auth = PendingAuthTicket(realm,
-                                                                           details.authid,
-                                                                           None,
-                                                                           cfg['authenticator'],
-                                                                           None)
-
-                                    return types.Challenge(u'ticket')
-
-                                else:
-                                    return types.Deny(message="illegal WAMP-Ticket authentication config (type '{0}' is unknown)".format(cfg['type']))
+                                return self.challengeWithTicket( details, realm )
 
                             # "Mozilla Persona" authentication
                             #
                             elif authmethod == u"mozilla_persona":
-                                cfg = self._transport_config['auth']['mozilla_persona']
-
-                                audience = cfg.get('audience', self._transport._origin)
-                                provider = cfg.get('provider', "https://verifier.login.persona.org/verify")
-
-                                # authrole mapping
-                                #
-                                authrole = cfg.get('role', 'anonymous')
-
-                                # check if role exists on realm anyway
-                                #
-                                if not self._router_factory[realm].has_role(authrole):
-                                    return types.Deny(ApplicationError.NO_SUCH_ROLE, message="authentication failed - realm '{}' has no role '{}'".format(realm, authrole))
-
-                                # ok, now challenge the client for doing Mozilla Persona auth.
-                                #
-                                self._pending_auth = PendingAuthPersona(provider, audience, authrole)
-                                return types.Challenge("mozilla-persona")
+                                return self.challengeWithMozillaPersona( realm )
 
                             # "Anonymous" authentication
                             #
                             elif authmethod == u"anonymous":
-                                cfg = self._transport_config['auth']['anonymous']
-
-                                # authrole mapping
-                                #
-                                authrole = cfg.get('role', 'anonymous')
-
-                                # check if role exists on realm anyway
-                                #
-                                if not self._router_factory[realm].has_role(authrole):
-                                    return types.Deny(ApplicationError.NO_SUCH_ROLE, message="authentication failed - realm '{}' has no role '{}'".format(realm, authrole))
-
-                                # authid generation
-                                #
-                                if self._transport._cbtid:
-                                    # if cookie tracking is enabled, set authid to cookie value
-                                    #
-                                    authid = self._transport._cbtid
-                                else:
-                                    # if no cookie tracking, generate a random value for authid
-                                    #
-                                    authid = util.newid(24)
-
-                                self._transport._authid = authid
-                                self._transport._authrole = authrole
-                                self._transport._authmethod = authmethod
-
-                                return types.Accept(authid=authid, authrole=authrole, authmethod=self._transport._authmethod)
+                                return self.challengeWithAnonymous()
 
                             # "Cookie" authentication
                             #
                             elif authmethod == u"cookie":
-                                pass
-                                # if self._transport._cbtid:
-                                #    cookie = self._transport.factory._cookies[self._transport._cbtid]
-                                #    authid = cookie['authid']
-                                #    authrole = cookie['authrole']
-                                #    authmethod = "cookie.{}".format(cookie['authmethod'])
-                                #    return types.Accept(authid = authid, authrole = authrole, authmethod = authmethod)
-                                # else:
-                                #    return types.Deny()
+                                return self.challengeWithCookie()
 
                             else:
                                 log.msg("unknown authmethod '{}'".format(authmethod))
@@ -800,6 +604,217 @@ class CrossbarRouterSession(RouterSession):
         except Exception as e:
             traceback.print_exc()
             return types.Deny(message="internal error: {}".format(e))
+
+    def challengeWithWAMPCRA( self, details ):
+        cfg = self._transport_config['auth']['wampcra']
+
+        if cfg['type'] == 'static':
+
+            if details.authid in cfg.get('users', {}):
+
+                user = cfg['users'][details.authid]
+
+                # the authid the session will be authenticated as is from the user data, or when
+                # the user data doesn't contain an authid, from the HELLO message the client sent
+                #
+                authid = user.get("authid", details.authid)
+
+                # construct a pending WAMP-CRA authentication
+                #
+                self._pending_auth = PendingAuthWampCra(details.pending_session,
+                                                        authid,
+                                                        user['role'],
+                                                        u'static',
+                                                        user['secret'].encode('utf8'))
+
+                # send challenge to client
+                #
+                extra = {
+                    u'challenge': self._pending_auth.challenge
+                }
+
+                # when using salted passwords, provide the client with
+                # the salt and then PBKDF2 parameters used
+                #
+                if 'salt' in user:
+                    extra[u'salt'] = user['salt']
+                    extra[u'iterations'] = user.get('iterations', 1000)
+                    extra[u'keylen'] = user.get('keylen', 32)
+
+                return types.Challenge(u'wampcra', extra)
+
+            else:
+                return types.Deny(message="no user with authid '{}' in user database".format(details.authid))
+
+        elif cfg['type'] == 'dynamic':
+
+            # call the configured dynamic authenticator procedure
+            # via the router's service session
+            #
+            service_session = self._router_factory.get(realm)._realm.session
+            session_details = {
+                # forward transport level details of the WAMP session that
+                # wishes to authenticate
+                'transport': self._transport._transport_info,
+
+                # the following WAMP session ID will be assigned to the session
+                # if (and only if) the subsequent authentication succeeds.
+                'session': self._pending_session_id
+            }
+            d = service_session.call(cfg['authenticator'], realm, details.authid, session_details)
+
+            def on_authenticate_ok(user):
+
+                # the authid the session will be authenticated as is from the dynamic
+                # authenticator response, or when the response doesn't contain an authid,
+                # from the HELLO message the client sent
+                #
+                authid = user.get("authid", details.authid)
+
+                # construct a pending WAMP-CRA authentication
+                #
+                self._pending_auth = PendingAuthWampCra(details.pending_session,
+                                                        authid,
+                                                        user['role'],
+                                                        u'dynamic',
+                                                        user['secret'].encode('utf8'))
+
+                # send challenge to client
+                #
+                extra = {
+                    u'challenge': self._pending_auth.challenge
+                }
+
+                # when using salted passwords, provide the client with
+                # the salt and the PBKDF2 parameters used
+                #
+                if 'salt' in user:
+                    extra[u'salt'] = user['salt']
+                    extra[u'iterations'] = user.get('iterations', 1000)
+                    extra[u'keylen'] = user.get('keylen', 32)
+
+                return types.Challenge(u'wampcra', extra)
+
+            def on_authenticate_error(err):
+
+                error = None
+                message = "dynamic WAMP-CRA credential getter failed: {}".format(err)
+
+                if isinstance(err.value, ApplicationError):
+                    error = err.value.error
+                    if err.value.args and len(err.value.args):
+                        message = str(err.value.args[0])  # exception does not need to contain a string
+
+                return types.Deny(error, message)
+
+            d.addCallbacks(on_authenticate_ok, on_authenticate_error)
+
+            return d
+
+        else:
+
+            return types.Deny(message="illegal WAMP-CRA authentication config (type '{0}' is unknown)".format(cfg['type']))
+    
+    def challengeWithTicket( self, details, realm ):
+        cfg = self._transport_config['auth']['ticket']
+
+        # use static principal database from configuration
+        #
+        if cfg['type'] == 'static':
+
+            if details.authid in cfg.get('principals', {}):
+
+                principal = cfg['principals'][details.authid]
+
+                # the authid the session will be authenticated as is from the principal data, or when
+                # the principal data doesn't contain an authid, from the HELLO message the client sent
+                #
+                authid = principal.get("authid", details.authid)
+
+                self._pending_auth = PendingAuthTicket(realm,
+                                                       authid,
+                                                       principal['role'],
+                                                       u'static',
+                                                       principal['ticket'].encode('utf8'))
+
+                return types.Challenge(u'ticket')
+            else:
+                return types.Deny(message="no principal with authid '{}' in principal database".format(details.authid))
+
+        # use configured procedure to dynamically get a ticket for the principal
+        #
+        elif cfg['type'] == 'dynamic':
+
+            self._pending_auth = PendingAuthTicket(realm,
+                                                   details.authid,
+                                                   None,
+                                                   cfg['authenticator'],
+                                                   None)
+
+            return types.Challenge(u'ticket')
+
+        else:
+            return types.Deny(message="illegal WAMP-Ticket authentication config (type '{0}' is unknown)".format(cfg['type']))
+
+    def challengeWithMozillaPersona( self, realm ):
+        cfg = self._transport_config['auth']['mozilla_persona']
+
+        audience = cfg.get('audience', self._transport._origin)
+        provider = cfg.get('provider', "https://verifier.login.persona.org/verify")
+
+        # authrole mapping
+        #
+        authrole = cfg.get('role', 'anonymous')
+
+        # check if role exists on realm anyway
+        #
+        if not self._router_factory[realm].has_role(authrole):
+            return types.Deny(ApplicationError.NO_SUCH_ROLE, message="authentication failed - realm '{}' has no role '{}'".format(realm, authrole))
+
+        # ok, now challenge the client for doing Mozilla Persona auth.
+        #
+        self._pending_auth = PendingAuthPersona(provider, audience, authrole)
+        return types.Challenge("mozilla-persona")
+
+    def challengeWithAnonymous( self ):
+        cfg = self._transport_config['auth']['anonymous']
+
+        # authrole mapping
+        #
+        authrole = cfg.get('role', 'anonymous')
+
+        # check if role exists on realm anyway
+        #
+        if not self._router_factory[realm].has_role(authrole):
+            return types.Deny(ApplicationError.NO_SUCH_ROLE, message="authentication failed - realm '{}' has no role '{}'".format(realm, authrole))
+
+        # authid generation
+        #
+        if self._transport._cbtid:
+            # if cookie tracking is enabled, set authid to cookie value
+            #
+            authid = self._transport._cbtid
+        else:
+            # if no cookie tracking, generate a random value for authid
+            #
+            authid = util.newid(24)
+
+        self._transport._authid = authid
+        self._transport._authrole = authrole
+        self._transport._authmethod = authmethod
+
+        return types.Accept(authid=authid, authrole=authrole, authmethod=self._transport._authmethod)
+
+    def challengeWithCookie( self ):
+        pass
+        # if self._transport._cbtid:
+        #    cookie = self._transport.factory._cookies[self._transport._cbtid]
+        #    authid = cookie['authid']
+        #    authrole = cookie['authrole']
+        #    authmethod = "cookie.{}".format(cookie['authmethod'])
+        #    return types.Accept(authid = authid, authrole = authrole, authmethod = authmethod)
+        # else:
+        #    return types.Deny()
 
     def onAuthenticate(self, signature, extra):
         """
