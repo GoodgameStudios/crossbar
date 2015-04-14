@@ -39,7 +39,8 @@ __all__ = (
     'PendingAuth',
     'PendingAuthPersona',
     'PendingAuthWampCra',
-    'PendingAuthTicket'
+    'PendingAuthTicket',
+    'PendingAuthGitlabOauth'
 )
 
 
@@ -128,3 +129,10 @@ class PendingAuthTicket(PendingAuth):
         self.authrole = authrole
         self.authprovider = authprovider
         self.ticket = ticket
+
+class PendingAuthGitlabOauth(PendingAuth):
+    def __init__(self, realm, gitlab_uri, role):
+        self.authmethod = u"gitlab-oauth"
+        self.uri = gitlab_uri + '/api/v3/user?access_token='
+        self.realm = realm
+        self.role = role

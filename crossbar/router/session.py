@@ -38,6 +38,7 @@ from six.moves import urllib
 
 from twisted.python import log
 from twisted.internet.defer import Deferred
+from twisted.web.client import getPage
 
 from autobahn import util
 from autobahn.websocket.compress import *  # noqa
@@ -54,7 +55,8 @@ from autobahn.wamp.interfaces import ITransportHandler
 
 from crossbar.router.auth import PendingAuthPersona, \
     PendingAuthWampCra, \
-    PendingAuthTicket
+    PendingAuthTicket, \
+    PendingAuthGitlabOauth
 
 
 __all__ = (
@@ -541,6 +543,8 @@ class CrossbarRouterSession(RouterSession):
             else:
                 # if authentication is enabled on the transport ..
                 #
+                print( "My client details are: " + str( details ) )
+                print( "My transport config is: " + str( self._transport_config ) )
                 if "auth" in self._transport_config:
 
                     # iterate over authentication methods announced by client ..
@@ -554,27 +558,32 @@ class CrossbarRouterSession(RouterSession):
                             # "WAMP-Challenge-Response" authentication
                             #
                             if authmethod == u"wampcra":
-                                return self.challengeWithWAMPCRA( details )
+                                return self.challengeWithWAMPCRA(details, realm)
 
                             # WAMP-Ticket authentication
                             #
                             elif authmethod == u"ticket":
-                                return self.challengeWithTicket( details, realm )
+                                return self.challengeWithTicket(details, realm)
 
                             # "Mozilla Persona" authentication
                             #
                             elif authmethod == u"mozilla_persona":
-                                return self.challengeWithMozillaPersona( realm )
+                                return self.challengeWithMozillaPersona(details, realm)
 
                             # "Anonymous" authentication
                             #
                             elif authmethod == u"anonymous":
-                                return self.challengeWithAnonymous()
+                                return self.challengeWithAnonymous(details, realm)
 
                             # "Cookie" authentication
                             #
                             elif authmethod == u"cookie":
-                                return self.challengeWithCookie()
+                                return self.challengeWithCookie(details, realm)
+
+                            # "Gitlab OAuth" authentication
+                            #
+                            elif authmethod == u"gitlab-oauth":
+                                return self.challengeWithGitlabOauth(details, realm)
 
                             else:
                                 log.msg("unknown authmethod '{}'".format(authmethod))
@@ -605,7 +614,7 @@ class CrossbarRouterSession(RouterSession):
             traceback.print_exc()
             return types.Deny(message="internal error: {}".format(e))
 
-    def challengeWithWAMPCRA( self, details ):
+    def challengeWithWAMPCRA(self, details, realm):
         cfg = self._transport_config['auth']['wampcra']
 
         if cfg['type'] == 'static':
@@ -714,8 +723,8 @@ class CrossbarRouterSession(RouterSession):
         else:
 
             return types.Deny(message="illegal WAMP-CRA authentication config (type '{0}' is unknown)".format(cfg['type']))
-    
-    def challengeWithTicket( self, details, realm ):
+
+    def challengeWithTicket(self, details, realm):
         cfg = self._transport_config['auth']['ticket']
 
         # use static principal database from configuration
@@ -756,7 +765,7 @@ class CrossbarRouterSession(RouterSession):
         else:
             return types.Deny(message="illegal WAMP-Ticket authentication config (type '{0}' is unknown)".format(cfg['type']))
 
-    def challengeWithMozillaPersona( self, realm ):
+    def challengeWithMozillaPersona(self, details, realm):
         cfg = self._transport_config['auth']['mozilla_persona']
 
         audience = cfg.get('audience', self._transport._origin)
@@ -776,7 +785,7 @@ class CrossbarRouterSession(RouterSession):
         self._pending_auth = PendingAuthPersona(provider, audience, authrole)
         return types.Challenge("mozilla-persona")
 
-    def challengeWithAnonymous( self ):
+    def challengeWithAnonymous(self, details, realm):
         cfg = self._transport_config['auth']['anonymous']
 
         # authrole mapping
@@ -801,11 +810,11 @@ class CrossbarRouterSession(RouterSession):
 
         self._transport._authid = authid
         self._transport._authrole = authrole
-        self._transport._authmethod = authmethod
+        self._transport._authmethod = u"anonymous"
 
         return types.Accept(authid=authid, authrole=authrole, authmethod=self._transport._authmethod)
 
-    def challengeWithCookie( self ):
+    def challengeWithCookie(self, details, realm):
         pass
         # if self._transport._cbtid:
         #    cookie = self._transport.factory._cookies[self._transport._cbtid]
@@ -815,6 +824,12 @@ class CrossbarRouterSession(RouterSession):
         #    return types.Accept(authid = authid, authrole = authrole, authmethod = authmethod)
         # else:
         #    return types.Deny()
+
+    def challengeWithGitlabOauth(self, details, realm):
+        print ( "Challenging gitlab authentication" )
+        cfg = self._transport_config['auth']['gitlab-oauth']
+        self._pending_auth = PendingAuthGitlabOauth(realm, cfg['uri'], cfg['role'])
+        return types.Challenge("gitlab-oauth")
 
     def onAuthenticate(self, signature, extra):
         """
@@ -933,7 +948,6 @@ class CrossbarRouterSession(RouterSession):
                 headers = {'Content-Type': 'application/x-www-form-urlencoded'}
                 body = urllib.urlencode({'audience': audience, 'assertion': assertion})
 
-                from twisted.web.client import getPage
                 d = getPage(url=provider,
                             method='POST',
                             postdata=body,
@@ -983,6 +997,36 @@ class CrossbarRouterSession(RouterSession):
 
                 return dres
 
+            elif isinstance(self._pending_auth, PendingAuthGitlabOauth):
+                dres = Deferred()
+                url = self._pending_auth.uri + signature
+                d = getPage(str(url))
+                def done( res ):
+                    log.msg( 'in done' )
+                    reply = json.loads( res )
+                    if not(type(reply) is dict):
+                        log.msg( 'Gitlab said something weird - denying access: {}'.format( reply ) )
+                        dres.callback(types.Deny(reason="wamp.error.authorization_request_failed", message=str("No dictionary")))
+
+                    if 'message' in reply:
+                        log.msg( 'Gitlab said something weird - denying access: {}'.format( reply ) )
+                        dres.callback(types.Deny(reason="wamp.error.authorization_request_failed", message=str(reply['message'])))
+                    if 'error' in reply:
+                        log.msg( 'Gitlab said something weird - denying access: {}'.format( reply ) )
+                        dres.callback(types.Deny(reason="wamp.error.authorization_request_failed", message=str(reply['error'])))
+                    self._transport._authid = reply['username']
+                    self._transport._authrole = self._pending_auth.role
+                    self._transport._authmethod = 'gitlab-oauth'
+ 
+                    dres.callback(types.Accept(authid=self._transport._authid, authrole=self._transport._authrole, authmethod=self._transport._authmethod))
+
+                def error( res ):
+                    log.msg("Could not reach gitlab - rejecting authentication: {}".format(res))
+                    dres.callback(types.Deny(reason="wamp.error.authorization_request_failed", message=str(err.value)))
+
+                d.addCallbacks(done, error)
+                return dres
+                
             else:
 
                 log.msg("don't know how to authenticate")

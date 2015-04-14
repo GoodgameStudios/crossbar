@@ -198,7 +198,12 @@ def check_transport_auth_anonymous(config):
         'role': (False, [six.text_type]),
     }, config, "WAMP-Anonymous configuration")
 
-
+def check_transport_auth_gitlab_oauth(config):
+    check_dict_args({
+        'uri': (False, [six.text_type]),
+        'role': (False, [six.text_type]),
+    }, config, "Gitlab Oauth configuration")
+ 
 def check_transport_auth(auth):
     """
     Check a WAMP transport authentication configuration.
@@ -209,6 +214,7 @@ def check_transport_auth(auth):
         'anonymous': check_transport_auth_anonymous,
         'ticket': check_transport_auth_ticket,
         'wampcra': check_transport_auth_wampcra,
+        'gitlab-oauth' : check_transport_auth_gitlab_oauth
     }
     for k in auth:
         if k not in CHECKS:
