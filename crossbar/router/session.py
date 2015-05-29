@@ -1022,7 +1022,7 @@ class CrossbarRouterSession(RouterSession):
 
                 def error( res ):
                     log.msg("Could not reach gitlab - rejecting authentication: {}".format(res))
-                    dres.callback(types.Deny(reason="wamp.error.authorization_request_failed", message=str(err.value)))
+                    dres.callback(types.Deny(reason="wamp.error.authorization_request_failed", message=str(res.value)))
 
                 d.addCallbacks(done, error)
                 return dres
