@@ -37,17 +37,16 @@ from autobahn.wamp.exception import ApplicationError
 
 from autobahn.wamp.message import _URI_PAT_STRICT_NON_EMPTY, \
     _URI_PAT_LOOSE_NON_EMPTY, _URI_PAT_STRICT_EMPTY, _URI_PAT_LOOSE_EMPTY
-from autobahn.twisted.wamp import FutureMixin
 
 from crossbar.router.observation import UriObservationMap
-from crossbar.router.types import RouterOptions
-from crossbar.router.interfaces import IRouter
+from crossbar.router import RouterOptions, RouterAction
+
+import txaio
 
 __all__ = ('Broker',)
 
 
-class Broker(FutureMixin):
-
+class Broker(object):
     """
     Basic WAMP broker.
     """
@@ -87,7 +86,7 @@ class Broker(FutureMixin):
         if session not in self._session_to_subscriptions:
             self._session_to_subscriptions[session] = set()
         else:
-            raise Exception("session with ID {} already attached".format(session._session_id))
+            raise Exception(u"session with ID {} already attached".format(session._session_id))
 
     def detach(self, session):
         """
@@ -127,7 +126,7 @@ class Broker(FutureMixin):
 
         if not uri_is_valid:
             if publish.acknowledge:
-                reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_URI, ["publish with invalid topic URI '{0}' (URI strict checking {1})".format(publish.topic, self._option_uri_strict)])
+                reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_URI, [u"publish with invalid topic URI '{0}' (URI strict checking {1})".format(publish.topic, self._option_uri_strict)])
                 session._transport.send(reply)
             return
 
@@ -137,7 +136,7 @@ class Broker(FutureMixin):
         if session._authrole is not None and session._authrole != u"trusted":
             if publish.topic.startswith(u"wamp.") or publish.topic.startswith(u"crossbar."):
                 if publish.acknowledge:
-                    reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_URI, ["publish with restricted topic URI '{0}'".format(publish.topic)])
+                    reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_URI, [u"publish with restricted topic URI '{0}'".format(publish.topic)])
                     session._transport.send(reply)
                 return
 
@@ -156,13 +155,13 @@ class Broker(FutureMixin):
                 self._router.validate('event', publish.topic, publish.args, publish.kwargs)
             except Exception as e:
                 if publish.acknowledge:
-                    reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_ARGUMENT, ["publish to topic URI '{0}' with invalid application payload: {1}".format(publish.topic, e)])
+                    reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_ARGUMENT, [u"publish to topic URI '{0}' with invalid application payload: {1}".format(publish.topic, e)])
                     session._transport.send(reply)
                 return
 
             # authorize PUBLISH action
             #
-            d = self._as_future(self._router.authorize, session, publish.topic, IRouter.ACTION_PUBLISH)
+            d = txaio.as_future(self._router.authorize, session, publish.topic, RouterAction.ACTION_PUBLISH)
 
             def on_authorize_success(authorized):
 
@@ -172,7 +171,7 @@ class Broker(FutureMixin):
                 if not authorized:
 
                     if publish.acknowledge:
-                        reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.NOT_AUTHORIZED, ["session not authorized to publish to topic '{0}'".format(publish.topic)])
+                        reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.NOT_AUTHORIZED, [u"session not authorized to publish to topic '{0}'".format(publish.topic)])
                         session._transport.send(reply)
 
                 else:
@@ -266,10 +265,10 @@ class Broker(FutureMixin):
                 # call to authorize succeed, but the authorization being denied)
                 #
                 if publish.acknowledge:
-                    reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.AUTHORIZATION_FAILED, ["failed to authorize session for publishing to topic URI '{0}': {1}".format(publish.topic, err.value)])
+                    reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.AUTHORIZATION_FAILED, [u"failed to authorize session for publishing to topic URI '{0}': {1}".format(publish.topic, err.value)])
                     session._transport.send(reply)
 
-            self._add_future_callbacks(d, on_authorize_success, on_authorize_error)
+            txaio.add_callbacks(d, on_authorize_success, on_authorize_error)
 
     def processSubscribe(self, session, subscribe):
         """
@@ -290,19 +289,19 @@ class Broker(FutureMixin):
                 uri_is_valid = _URI_PAT_LOOSE_NON_EMPTY.match(subscribe.topic)
 
         if not uri_is_valid:
-            reply = message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.INVALID_URI, ["subscribe for invalid topic URI '{0}'".format(subscribe.topic)])
+            reply = message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.INVALID_URI, [u"subscribe for invalid topic URI '{0}'".format(subscribe.topic)])
             session._transport.send(reply)
             return
 
         # authorize action
         #
-        d = self._as_future(self._router.authorize, session, subscribe.topic, IRouter.ACTION_SUBSCRIBE)
+        d = txaio.as_future(self._router.authorize, session, subscribe.topic, RouterAction.ACTION_SUBSCRIBE)
 
         def on_authorize_success(authorized):
             if not authorized:
                 # error reply since session is not authorized to subscribe
                 #
-                reply = message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.NOT_AUTHORIZED, ["session is not authorized to subscribe to topic '{0}'".format(subscribe.topic)])
+                reply = message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.NOT_AUTHORIZED, [u"session is not authorized to subscribe to topic '{0}'".format(subscribe.topic)])
 
             else:
                 # ok, session authorized to subscribe. now get the subscription
@@ -340,10 +339,10 @@ class Broker(FutureMixin):
             # the call to authorize the action _itself_ failed (note this is different from the
             # call to authorize succeed, but the authorization being denied)
             #
-            reply = message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.AUTHORIZATION_FAILED, ["failed to authorize session for subscribing to topic URI '{0}': {1}".format(subscribe.topic, err.value)])
+            reply = message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.AUTHORIZATION_FAILED, [u"failed to authorize session for subscribing to topic URI '{0}': {1}".format(subscribe.topic, err.value)])
             session._transport.send(reply)
 
-        self._add_future_callbacks(d, on_authorize_success, on_authorize_error)
+        txaio.add_callbacks(d, on_authorize_success, on_authorize_error)
 
     def processUnsubscribe(self, session, unsubscribe):
         """

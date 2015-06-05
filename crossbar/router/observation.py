@@ -43,8 +43,8 @@ def is_protected_uri(uri):
 
 class OrderedSet(set):
 
-    def __init__(self, iter=None):
-        super(set, self).__init__(iter)
+    def __init__(self):
+        super(set, self).__init__()
         self._list = []
 
     def add(self, item):
@@ -66,7 +66,6 @@ class OrderedSet(set):
 
 
 class UriObservation(object):
-
     """
     Represents an URI observation maintained by a broker/dealer.
     """
@@ -99,6 +98,11 @@ class UriObservation(object):
             self.observers = OrderedSet()
         else:
             self.observers = set()
+
+    def __repr__(self):
+        return "<{} id={} uri={} ordered={} extra={} created={} observers={}>".format(
+            self.__class__.__name__, self.id, self.uri, self.ordered, self.extra, self.created,
+            self.observers)
 
 
 class ExactUriObservation(UriObservation):

@@ -28,7 +28,7 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
+from __future__ import absolute_import, print_function
 
 __all__ = ('run',)
 
@@ -53,7 +53,7 @@ def run():
     # present.
 
     def ignore(sig, frame):
-        log.msg("Ignoring SIGINT in worker.")
+        log.debug("Ignoring SIGINT in worker.")
     signal.signal(signal.SIGINT, ignore)
 
     # create the top-level parser
@@ -105,15 +105,24 @@ def run():
 
     # make sure logging to something else than stdio is setup _first_
     #
-    from twisted.python import log
-    from crossbar.twisted.processutil import BareFormatFileLogObserver
-    flo = BareFormatFileLogObserver(sys.stderr)
-    log.startLoggingWithObserver(flo.emit)
+    from crossbar._logging import make_JSON_observer, cb_logging_aware, _stderr
+    from crossbar._logging import make_logger, log_publisher, start_logging
+
+    log = make_logger()
+
+    # Print a magic phrase that tells the capturing logger that it supports
+    # Crossbar's rich logging
+    print(cb_logging_aware, file=_stderr)
+    _stderr.flush()
+
+    flo = make_JSON_observer(_stderr)
+    log_publisher.addObserver(flo)
+    start_logging()
 
     try:
         import setproctitle
     except ImportError:
-        log.msg("Warning: could not set worker process title (setproctitle not installed)")
+        log.info("Warning: could not set worker process title (setproctitle not installed)")
     else:
         # set process title if requested to
         #
@@ -132,7 +141,9 @@ def run():
     reactor = install_reactor(options.reactor)
 
     from twisted.python.reflect import qual
-    log.msg("Running under {} using {} reactor".format(platform.python_implementation(), qual(reactor.__class__).split('.')[-1]))
+    log.info("Running under {python} using {reactor} reactor",
+             python=platform.python_implementation(),
+             reactor=qual(reactor.__class__).split('.')[-1])
 
     options.cbdir = os.path.abspath(options.cbdir)
     os.chdir(options.cbdir)
@@ -154,7 +165,7 @@ def run():
             try:
                 # this log message is unlikely to reach the controller (unless
                 # only stdin/stdout pipes were lost, but not stderr)
-                log.msg("Connection to node controller lost.")
+                log.warn("Connection to node controller lost.")
                 WampWebSocketServerProtocol.connectionLost(self, reason)
             except:
                 pass
@@ -191,11 +202,11 @@ def run():
 
         # now start reactor loop
         #
-        log.msg("Entering event loop ..")
+        log.info("Entering event loop...")
         reactor.run()
 
     except Exception as e:
-        log.msg("Unhandled exception: {}".format(e))
+        log.info("Unhandled exception: {}".format(e))
         if reactor.running:
             reactor.addSystemEventTrigger('after', 'shutdown', os._exit, 1)
             reactor.stop()

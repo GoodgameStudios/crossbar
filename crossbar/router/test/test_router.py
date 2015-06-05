@@ -32,12 +32,15 @@ from __future__ import absolute_import
 
 from twisted.trial import unittest
 
+import txaio
+
 from autobahn.wamp import types
-from autobahn.twisted.wamp import FutureMixin, \
-    ApplicationSession
+from autobahn.twisted.wamp import ApplicationSession
 
 from crossbar.router.router import RouterFactory
 from crossbar.router.session import RouterSessionFactory
+from crossbar.worker.router import RouterRealm
+from crossbar.router.role import RouterRoleStaticAuth, RouterPermissions
 
 
 class TestEmbeddedSessions(unittest.TestCase):
@@ -50,7 +53,19 @@ class TestEmbeddedSessions(unittest.TestCase):
         """
         Setup router and router session factories.
         """
+
+        # create a router factory
         self.router_factory = RouterFactory()
+
+        # start a realm
+        self.router_factory.start_realm(RouterRealm(None, {u'name': u'realm1'}))
+
+        # allow everything
+        permissions = RouterPermissions('', True, True, True, True, True)
+        router = self.router_factory.get(u'realm1')
+        router.add_role(RouterRoleStaticAuth(router, None, default_permissions=permissions))
+
+        # create a router session factory
         self.session_factory = RouterSessionFactory(self.router_factory)
 
     def tearDown(self):
@@ -61,12 +76,12 @@ class TestEmbeddedSessions(unittest.TestCase):
         Create an application session and add it to a router to
         run embedded.
         """
-        d = FutureMixin._create_future()
+        d = txaio.create_future()
 
         class TestSession(ApplicationSession):
 
             def onJoin(self, details):
-                FutureMixin._resolve_future(d, None)
+                txaio.resolve(d, None)
 
         session = TestSession(types.ComponentConfig(u'realm1'))
 
@@ -79,7 +94,7 @@ class TestEmbeddedSessions(unittest.TestCase):
         Create an application session that subscribes to some
         topic and add it to a router to run embedded.
         """
-        d = FutureMixin._create_future()
+        d = txaio.create_future()
 
         class TestSession(ApplicationSession):
 
@@ -91,12 +106,12 @@ class TestEmbeddedSessions(unittest.TestCase):
                 d2 = self.subscribe(on_event, u'com.example.topic1')
 
                 def ok(_):
-                    FutureMixin._resolve_future(d, None)
+                    txaio.resolve(d, None)
 
                 def error(err):
-                    FutureMixin._reject_future(d, err)
+                    txaio.reject(d, err)
 
-                FutureMixin._add_future_callbacks(d2, ok, error)
+                txaio.add_callbacks(d2, ok, error)
 
         session = TestSession(types.ComponentConfig(u'realm1'))
 

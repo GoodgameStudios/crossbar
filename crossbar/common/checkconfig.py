@@ -35,6 +35,8 @@ import json
 import re
 import six
 
+from twisted.python.compat import unicode
+
 from pprint import pformat
 
 from autobahn.websocket.protocol import parseWsUrl
@@ -807,6 +809,65 @@ def check_web_path_service_path(config):
     check_paths(config['paths'], nested=True)
 
 
+def check_web_path_service_max_file_size(limit):
+    """
+    Check maximum "max_file_size" parameter.
+
+    :param limit: The limit to check.
+    :type limit: int
+    """
+    if type(limit) not in six.integer_types:
+        raise Exception("'max_file_size' attribute must be integer ({} encountered)".format(type(limit)))
+    if limit < 0:
+        raise Exception("invalid value {} for 'max_file_size' attribute - must be non-negative".format(limit))
+
+
+def check_web_path_service_upload(config):
+    """
+    Check a file upload path service on Web transport.
+
+    :param config: The path service configuration.
+    :type config: dict
+    """
+
+    check_dict_args({
+        'type': (True, [six.text_type]),
+        'realm': (True, [six.text_type]),
+        'role': (True, [six.text_type]),
+        'directory': (True, [six.text_type]),
+        'temp_directory': (False, [six.text_type]),
+        'form_fields': (True, [dict]),
+        'options': (False, [dict])
+    }, config, "Web transport 'upload' path service")
+
+    check_dict_args({
+        'file_id': (True, [six.text_type]),
+        'file_name': (True, [six.text_type]),
+        'mime_type': (True, [six.text_type]),
+        'total_size': (True, [six.text_type]),
+        'chunk_number': (True, [six.text_type]),
+        'chunk_size': (True, [six.text_type]),
+        'total_chunks': (True, [six.text_type]),
+        'content': (True, [six.text_type]),
+        'on_progress': (False, [six.text_type]),
+        'session': (False, [six.text_type]),
+    }, config['form_fields'], "File upload form field settings")
+
+    if 'on_progress' in config['form_fields']:
+        check_or_raise_uri(config['form_fields']['on_progress'], "invalid File Progress URI '{}' in File Upload configuration. ".format(config['form_fields']['on_progress']))
+
+    if 'options' in config:
+        check_dict_args({
+            'debug': (False, [bool]),
+            'max_file_size': (False, six.integer_types),
+            'file_types': (False, [list]),
+            'file_permissions': (False, [six.text_type]),
+        }, config['options'], "Web transport 'upload' path service")
+
+        if 'max_file_size' in config['options']:
+            check_web_path_service_max_file_size(config['options']['max_file_size'])
+
+
 def check_web_path_service(path, config, nested):
     """
     Check a single path service on Web transport.
@@ -824,7 +885,7 @@ def check_web_path_service(path, config, nested):
         if ptype not in ['static', 'wsgi', 'redirect', 'publisher', 'caller', 'resource']:
             raise Exception("invalid type '{}' for root-path service in Web transport path service '{}' configuration\n\n{}".format(ptype, path, config))
     else:
-        if ptype not in ['websocket', 'static', 'wsgi', 'redirect', 'json', 'cgi', 'longpoll', 'publisher', 'caller', 'schemadoc', 'path', 'resource']:
+        if ptype not in ['websocket', 'static', 'wsgi', 'redirect', 'json', 'cgi', 'longpoll', 'publisher', 'caller', 'schemadoc', 'path', 'resource', 'upload']:
             raise Exception("invalid type '{}' for sub-path service in Web transport path service '{}' configuration\n\n{}".format(ptype, path, config))
 
     checkers = {
@@ -839,7 +900,8 @@ def check_web_path_service(path, config, nested):
         'caller': check_web_path_service_caller,
         'schemadoc': check_web_path_service_schemadoc,
         'path': check_web_path_service_path,
-        'resource': check_web_path_service_resource
+        'resource': check_web_path_service_resource,
+        'upload': check_web_path_service_upload
     }
 
     checkers[ptype](config)
@@ -1315,7 +1377,7 @@ def check_router_component(component, silence=False):
         raise Exception("logic error")
 
 
-def check_container_transport(transport, silence=False):
+def check_connecting_transport(transport, silence=False):
     """
     Check container transports.
 
@@ -1385,7 +1447,7 @@ def check_container_component(component, silence=False):
     else:
         raise Exception("logic error")
 
-    check_container_transport(component['transport'])
+    check_connecting_transport(component['transport'])
 
 
 def check_router_realm(realm, silence=False):
@@ -1821,6 +1883,26 @@ def check_controller(controller, silence=False):
         check_listening_transport_websocket(controller['transport'])
 
 
+def check_manager(manager, silence=False):
+    """
+    Check a node manager configuration item.
+
+    :param manager: The manager configuration to check.
+    :type manager: dict
+    """
+    if not isinstance(manager, dict):
+        raise Exception("manager items must be dictionaries ({} encountered)\n\n{}".format(type(manager), pformat(manager)))
+
+    check_dict_args({
+        'id': (True, [six.text_type]),
+        'key': (True, [six.text_type]),
+        'realm': (True, [six.text_type]),
+        'transport': (True, [dict]),
+    }, manager, "invalid manager configuration")
+
+    check_connecting_transport(manager['transport'])
+
+
 def check_config(config, silence=False):
     """
     Check a Crossbar.io top-level configuration.
@@ -1832,29 +1914,36 @@ def check_config(config, silence=False):
         raise Exception("top-level configuration item must be a dictionary ({} encountered)".format(type(config)))
 
     for k in config:
-        if k not in ['controller', 'workers']:
+        if k not in ['manager', 'controller', 'workers']:
             raise Exception("encountered unknown attribute '{}' in top-level configuration".format(k))
 
-    # check contoller config
-    #
-    if 'controller' in config:
-        if not silence:
-            print("Checking controller item ..")
-        check_controller(config['controller'])
+    if 'manager' in config and ('controller' in config or 'workers' in config):
+        raise Exception("when running in managed mode, no workers/conroller attributes must be present in configuration")
 
-    # check workers
-    #
-    workers = config.get('workers', [])
+    if 'manager' in config:
+        check_manager(config['manager'])
 
-    if not isinstance(workers, list):
-        raise Exception("'workers' attribute in top-level configuration must be a list ({} encountered)".format(type(workers)))
+    else:
+        # check contoller config
+        #
+        if 'controller' in config:
+            if not silence:
+                print("Checking controller item ..")
+            check_controller(config['controller'])
 
-    i = 1
-    for worker in workers:
-        if not silence:
-            print("Checking worker item {} ..".format(i))
-        check_worker(worker, silence)
-        i += 1
+        # check workers
+        #
+        workers = config.get('workers', [])
+
+        if not isinstance(workers, list):
+            raise Exception("'workers' attribute in top-level configuration must be a list ({} encountered)".format(type(workers)))
+
+        i = 1
+        for worker in workers:
+            if not silence:
+                print("Checking worker item {} ..".format(i))
+            check_worker(worker, silence)
+            i += 1
 
 
 def check_config_file(configfile, silence=False):
@@ -1867,7 +1956,7 @@ def check_config_file(configfile, silence=False):
     configext = os.path.splitext(configfile)[1]
     configfile = os.path.abspath(configfile)
 
-    with open(configfile, 'rb') as infile:
+    with open(configfile, 'r') as infile:
         if configext == '.yaml':
             try:
                 config = yaml.safe_load(infile)

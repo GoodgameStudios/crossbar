@@ -35,10 +35,12 @@ import sys
 import jinja2
 import importlib
 import pkg_resources
+import tempfile
 from datetime import datetime
 
 from twisted.internet import reactor
 from twisted.python import log
+from twisted.python.compat import unicode
 from twisted.internet.defer import DeferredList
 from twisted.internet.defer import inlineCallbacks
 
@@ -48,12 +50,12 @@ from autobahn.wamp.exception import ApplicationError
 
 from crossbar.twisted.resource import StaticResource, StaticResourceNoListing
 
-from crossbar.router.session import CrossbarRouterSessionFactory
-from crossbar.router.service import CrossbarRouterServiceSession
-from crossbar.router.router import CrossbarRouterFactory
+from crossbar.router.session import RouterSessionFactory
+from crossbar.router.service import RouterServiceSession
+from crossbar.router.router import RouterFactory
 
-from crossbar.router.protocol import CrossbarWampWebSocketServerFactory, \
-    CrossbarWampRawSocketServerFactory
+from crossbar.router.protocol import WampWebSocketServerFactory, \
+    WampRawSocketServerFactory
 
 from crossbar.worker.testee import WebSocketTesteeServerFactory, \
     StreamTesteeServerFactory
@@ -65,7 +67,7 @@ from autobahn.wamp.types import RegisterOptions
 try:
     from twisted.web.wsgi import WSGIResource
     _HAS_WSGI = True
-except ImportError:
+except (ImportError, SyntaxError):
     # Twisted hasn't ported this to Python 3 yet
     _HAS_WSGI = False
 
@@ -87,13 +89,14 @@ from crossbar.twisted.site import createHSTSRequestFactory
 
 from crossbar.twisted.resource import JsonResource, \
     Resource404, \
+    FileUploadResource, \
     RedirectResource
 
 from autobahn.twisted.flashpolicy import FlashPolicyFactory
 
 from autobahn.wamp.types import ComponentConfig
 
-from crossbar.worker.native import NativeWorkerSession
+from crossbar.worker.worker import NativeWorkerSession
 
 from crossbar.common import checkconfig
 from crossbar.twisted.site import patchFileContentTypes
@@ -144,6 +147,7 @@ class RouterTransport:
         self.config = config
         self.factory = factory
         self.port = port
+        self.created = datetime.utcnow()
 
 
 class RouterComponent:
@@ -234,10 +238,10 @@ class RouterWorkerSession(NativeWorkerSession):
         self._templates = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
 
         # factory for producing (per-realm) routers
-        self.factory = CrossbarRouterFactory()
+        self._router_factory = RouterFactory()
 
         # factory for producing router sessions
-        self.session_factory = CrossbarRouterSessionFactory(self.factory)
+        self._router_session_factory = RouterSessionFactory(self._router_factory)
 
         # map: realm ID -> RouterRealm
         self.realms = {}
@@ -295,7 +299,7 @@ class RouterWorkerSession(NativeWorkerSession):
         if self.debug:
             log.msg("{}.get_router_realms".format(self.__class__.__name__))
 
-        raise NotImplementedError()
+        raise Exception("not implemented")
 
     def start_router_realm(self, id, config, schemas=None, details=None):
         """
@@ -320,12 +324,12 @@ class RouterWorkerSession(NativeWorkerSession):
         self.realm_to_id[realm] = id
 
         # create a new router for the realm
-        router = self.factory.start_realm(rlm)
+        router = self._router_factory.start_realm(rlm)
 
         # add a router/realm service session
         cfg = ComponentConfig(realm)
-        rlm.session = CrossbarRouterServiceSession(cfg, router, schemas)
-        self.session_factory.add(rlm.session, authrole=u'trusted')
+        rlm.session = RouterServiceSession(cfg, router, schemas)
+        self._router_session_factory.add(rlm.session, authrole=u'trusted')
 
     def stop_router_realm(self, id, close_sessions=False, details=None):
         """
@@ -384,7 +388,7 @@ class RouterWorkerSession(NativeWorkerSession):
         self.realms[id].roles[role_id] = RouterRealmRole(role_id, config)
 
         realm = self.realms[id].config['name']
-        self.factory.add_role(realm, config)
+        self._router_factory.add_role(realm, config)
 
     def stop_router_realm_role(self, id, role_id, details=None):
         """
@@ -507,7 +511,7 @@ class RouterWorkerSession(NativeWorkerSession):
             raise ApplicationError("crossbar.error.class_import_failed", "session not derived of ApplicationSession")
 
         self.components[id] = RouterComponent(id, config, session)
-        self.session_factory.add(session, authrole=config.get('role', 'anonymous'))
+        self._router_session_factory.add(session, authrole=config.get('role', u'anonymous'))
 
     def stop_router_component(self, id, details=None):
         """
@@ -539,11 +543,14 @@ class RouterWorkerSession(NativeWorkerSession):
         if self.debug:
             log.msg("{}.get_router_transports".format(self.__class__.__name__))
 
-        res = {}
-        for key, transport in self._transports.items():
-            res[key] = transport.config
+        res = []
+        for transport in sorted(self.transports.values(), key=lambda c: c.created):
+            res.append({
+                'id': transport.id,
+                'created': utcstr(transport.created),
+                'config': transport.config,
+            })
         return res
-        # return sorted(self._transports.keys())
 
     def start_router_transport(self, id, config, details=None):
         """
@@ -580,14 +587,14 @@ class RouterWorkerSession(NativeWorkerSession):
         #
         if config['type'] == 'rawsocket':
 
-            transport_factory = CrossbarWampRawSocketServerFactory(self.session_factory, config)
+            transport_factory = WampRawSocketServerFactory(self._router_session_factory, config)
             transport_factory.noisy = False
 
         # standalone WAMP-WebSocket transport
         #
         elif config['type'] == 'websocket':
 
-            transport_factory = CrossbarWampWebSocketServerFactory(self.session_factory, self.config.extra.cbdir, config, self._templates)
+            transport_factory = WampWebSocketServerFactory(self._router_session_factory, self.config.extra.cbdir, config, self._templates)
             transport_factory.noisy = False
 
         # Flash-policy file server pseudo transport
@@ -735,7 +742,7 @@ class RouterWorkerSession(NativeWorkerSession):
 
                 # add the publishing session to the router
                 #
-                self.session_factory.add(publisher_session, authrole=root_config.get('role', 'anonymous'))
+                self._router_session_factory.add(publisher_session, authrole=root_config.get('role', 'anonymous'))
 
                 # now create the publisher Twisted Web resource and add it to resource tree
                 #
@@ -752,7 +759,7 @@ class RouterWorkerSession(NativeWorkerSession):
 
                 # add the calling session to the router
                 #
-                self.session_factory.add(caller_session, authrole=root_config.get('role', 'anonymous'))
+                self._router_session_factory.add(caller_session, authrole=root_config.get('role', 'anonymous'))
 
                 # now create the caller Twisted Web resource and add it to resource tree
                 #
@@ -852,9 +859,13 @@ class RouterWorkerSession(NativeWorkerSession):
         """
         for path in sorted(paths):
 
-            if path != "/":
+            if isinstance(path, unicode):
+                webPath = path.encode('utf8')
+            else:
+                webPath = path
 
-                resource.putChild(path, self.create_resource(paths[path]))
+            if path != b"/":
+                resource.putChild(webPath, self.create_resource(paths[path]))
 
     def create_resource(self, path_config):
         """
@@ -869,7 +880,7 @@ class RouterWorkerSession(NativeWorkerSession):
         #
         if path_config['type'] == 'websocket':
 
-            ws_factory = CrossbarWampWebSocketServerFactory(self.session_factory, self.config.extra.cbdir, path_config, self._templates)
+            ws_factory = WampWebSocketServerFactory(self._router_session_factory, self.config.extra.cbdir, path_config, self._templates)
 
             # FIXME: Site.start/stopFactory should start/stop factories wrapped as Resources
             ws_factory.startFactory()
@@ -1000,7 +1011,7 @@ class RouterWorkerSession(NativeWorkerSession):
 
             path_options = path_config.get('options', {})
 
-            lp_resource = WampLongPollResource(self.session_factory,
+            lp_resource = WampLongPollResource(self._router_session_factory,
                                                timeout=path_options.get('request_timeout', 10),
                                                killAfter=path_options.get('session_timeout', 30),
                                                queueLimitBytes=path_options.get('queue_limit_bytes', 128 * 1024),
@@ -1023,7 +1034,7 @@ class RouterWorkerSession(NativeWorkerSession):
 
             # add the publisher session to the router
             #
-            self.session_factory.add(publisher_session, authrole=path_config.get('role', 'anonymous'))
+            self._router_session_factory.add(publisher_session, authrole=path_config.get('role', 'anonymous'))
 
             # now create the publisher Twisted Web resource
             #
@@ -1040,11 +1051,41 @@ class RouterWorkerSession(NativeWorkerSession):
 
             # add the calling session to the router
             #
-            self.session_factory.add(caller_session, authrole=path_config.get('role', 'anonymous'))
+            self._router_session_factory.add(caller_session, authrole=path_config.get('role', 'anonymous'))
 
             # now create the caller Twisted Web resource
             #
             return CallerResource(path_config.get('options', {}), caller_session)
+
+        # File Upload resource
+        #
+        elif path_config['type'] == 'upload':
+
+            upload_directory = os.path.abspath(os.path.join(self.config.extra.cbdir, path_config['directory']))
+            upload_directory = upload_directory.encode('ascii', 'ignore')  # http://stackoverflow.com/a/20433918/884770
+            if not os.path.isdir(upload_directory):
+                emsg = "configured upload directory '{}' in file upload resource isn't a directory".format(upload_directory)
+                log.msg(emsg)
+                raise ApplicationError("crossbar.error.invalid_configuration", emsg)
+
+            if 'temp_directory' in path_config:
+                temp_directory = os.path.abspath(os.path.join(self.config.extra.cbdir, path_config['temp_directory']))
+                temp_directory = temp_directory.encode('ascii', 'ignore')  # http://stackoverflow.com/a/20433918/884770
+            else:
+                temp_directory = os.path.abspath(tempfile.gettempdir())
+            if not os.path.isdir(temp_directory):
+                emsg = "configured temp directory '{}' in file upload resource isn't a directory".format(temp_directory)
+                log.msg(emsg)
+                raise ApplicationError("crossbar.error.invalid_configuration", emsg)
+
+            # file upload progress and finish events are published via this session
+            #
+            upload_session_config = ComponentConfig(realm=path_config['realm'], extra=None)
+            upload_session = ApplicationSession(upload_session_config)
+
+            self._router_session_factory.add(upload_session, authrole=path_config.get('role', 'anonymous'))
+
+            return FileUploadResource(upload_directory, temp_directory, path_config['form_fields'], upload_session, path_config.get('options', {}))
 
         # Generic Twisted Web resource
         #

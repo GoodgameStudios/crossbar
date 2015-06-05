@@ -30,24 +30,26 @@
 
 from __future__ import absolute_import
 
-from datetime import datetime
-from collections import deque
+import six
+import json
 
-from twisted.python import log
+from datetime import datetime
+
 from twisted.internet.defer import Deferred
 
-from autobahn.util import utcnow
+from crossbar._logging import make_logger, LogLevel, record_separator
+from crossbar._logging import cb_logging_aware, escape_formatting
 
 __all__ = ('RouterWorkerProcess',
            'ContainerWorkerProcess',
            'GuestWorkerProcess')
 
 
-class WorkerProcess:
-
+class WorkerProcess(object):
     """
     Internal run-time representation of a worker process.
     """
+    _logger = make_logger()
 
     TYPE = 'worker'
     LOGNAME = 'Worker'
@@ -77,25 +79,32 @@ class WorkerProcess:
         self.created = datetime.utcnow()
         self.connected = None
         self.started = None
-
-        # a buffered log for log messages coming from the worker
-        # native workers will send log messages on stderr, while
-        # guest worker may use stdout/stderr
-        self._keeplog = keeplog
-        if self._keeplog is not None:
-            self._log = deque()
-        else:
-            self._log = None
-
         self._log_fds = [2]
         self._log_lineno = 0
         self._log_topic = 'crossbar.node.{}.worker.{}.on_log'.format(self._controller._node_id, self.id)
+
+        self._log_rich = None  # Does not support rich logs
 
         # A deferred that resolves when the worker is ready.
         self.ready = Deferred()
 
         # A deferred that resolves when the worker has exited.
         self.exit = Deferred()
+        self.exit.addBoth(self._dump_remaining_log)
+
+    def _dump_remaining_log(self, result):
+        """
+        If there's anything left in the log buffer, log it out so it's not
+        lost.
+        """
+        if self._log_rich and self._log_data != u"":
+            self._logger.warn("REMAINING LOG BUFFER AFTER EXIT FOR PID {pid}:",
+                              pid=self.pid)
+
+            for log in self._log_data.split(u"\n"):
+                self._logger.warn(escape_formatting(log))
+
+        return result
 
     def log(self, childFD, data):
         """
@@ -103,49 +112,58 @@ class WorkerProcess:
         """
         assert(childFD in self._log_fds)
 
-        for msg in data.split('\n'):
-            msg = msg.strip()
-            if msg != "":
+        if type(data) != six.text_type:
+            data = data.decode('utf8')
 
-                # log entry used for buffered worker log and/or worker log events
-                #
-                if self._log is not None or self._log_topic:
-                    log_entry = (self._log_lineno, utcnow(), msg)
-
-                # maintain buffered worker log
-                #
-                if self._log is not None:
-                    self._log_lineno += 1
-                    self._log.append(log_entry)
-                    if self._keeplog > 0 and len(self._log) > self._keeplog:
-                        self._log.popleft()
-
-                # publish worker log event
-                #
-                if self._log_topic:
-                    self._controller.publish(self._log_topic, log_entry)
-
-                # log to controller
-                #
-                log.msg(msg, system="{:<10} {:>6}".format(self.LOGNAME, self.pid), override_system=True)
-
-    def getlog(self, limit=None):
-        """
-        Get buffered worker log.
-
-        :param limit: Optionally, limit the amount of log entries returned
-           to the last N entries.
-        :type limit: None or int
-
-        :returns: list -- Buffered log.
-        """
-        if self._log:
-            if limit and len(self._log) > limit:
-                return list(self._log)[len(self._log) - limit:]
+        if self._log_rich is None:
+            # If it supports rich logging, it will print just the logger aware
+            # "magic phrase" as its first message.
+            if data == cb_logging_aware + u"\n":
+                self._log_rich = True
+                self._log_data = u""  # Log buffer
+                return
             else:
-                return list(self._log)
+                self._log_rich = False
+
+        system = "{:<10} {:>6}".format(self.LOGNAME, self.pid)
+
+        if self._log_rich:
+            # This guest supports rich logs.
+            self._log_data += data
+
+            while record_separator in self._log_data:
+
+                log, self._log_data = self._log_data.split(record_separator, 1)
+
+                try:
+                    event = json.loads(log)
+                except ValueError:
+                    # If invalid JSON is written out, just output the raw text.
+                    # We tried!
+                    event = {"level": u"warn",
+                             "text": u"INVALID JSON: {}".format(escape_formatting(log))}
+                event_text = event["text"]
+                level = LogLevel.levelWithName(event["level"])
+
+                self._logger.emit(level, event_text, log_system=system)
+
+                if self._log_topic:
+                    self._controller.publish(self._log_topic, event_text)
+
         else:
-            return []
+            # Rich logs aren't supported
+            data = escape_formatting(data)
+
+            for row in data.split(u"\n"):
+                row = row.strip()
+
+                if row == u"":
+                    continue
+
+                self._logger.emit(LogLevel.info, row, log_system=system)
+
+                if self._log_topic:
+                    self._controller.publish(self._log_topic, row)
 
 
 class NativeWorkerProcess(WorkerProcess):

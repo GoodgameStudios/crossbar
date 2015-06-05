@@ -39,10 +39,15 @@ import pkg_resources
 import platform
 import traceback
 
-from twisted.python import log
+import click
+
 from twisted.python.reflect import qual
 
+from autobahn.util import utcnow
 from autobahn.twisted.choosereactor import install_reactor
+
+import crossbar
+from crossbar._logging import log, log_publisher
 
 try:
     import psutil
@@ -50,8 +55,32 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
+_HAS_COLOR_TERM = False
+try:
+    import colorama
+
+    # https://github.com/tartley/colorama/issues/48
+    term = None
+    if sys.platform == 'win32' and 'TERM' in os.environ:
+        term = os.environ.pop('TERM')
+
+    colorama.init()
+    _HAS_COLOR_TERM = True
+
+    if term:
+        os.environ['TERM'] = term
+
+except ImportError:
+    pass
+
 __all__ = ('run',)
 
+# http://patorjk.com/software/taag/#p=display&h=1&f=Stick%20Letters&t=Crossbar.io
+BANNER = r"""     __  __  __  __  __  __      __     __
+    /  `|__)/  \/__`/__`|__) /\ |__)  |/  \
+    \__,|  \\__/.__/.__/|__)/~~\|  \. |\__/
+
+"""
 
 _PID_FILENAME = 'node.pid'
 
@@ -80,6 +109,18 @@ def check_pid_exists(pid):
             return False
         else:
             return True
+
+
+def _is_crossbar_process(cmdline):
+    """
+    Returns True if the cmdline passed appears to really be a running
+    crossbar instance.
+    """
+    if len(cmdline) > 1 and 'crossbar' in cmdline[1]:
+        return True
+    if cmdline[0] == 'crossbar-controller':
+        return True
+    return False
 
 
 def check_is_running(cbdir):
@@ -118,7 +159,7 @@ def check_is_running(cbdir):
                             # additionally check this is actually a crossbar process
                             p = psutil.Process(pid)
                             cmdline = p.cmdline()
-                            if len(cmdline) < 2 or not cmdline[1].endswith('crossbar'):
+                            if not _is_crossbar_process(cmdline):
                                 nicecmdline = ' '.join(cmdline)
                                 if len(nicecmdline) > 76:
                                     nicecmdline = nicecmdline[:38] + ' ... ' + nicecmdline[-38:]
@@ -206,9 +247,6 @@ def run_command_version(options):
         msgpack_ver = 'msgpack-python-%s' % pkg_resources.require('msgpack-python')[0].version
     except ImportError:
         msgpack_ver = '-'
-
-    import crossbar
-    import platform
 
     print("")
     print("Crossbar.io package versions and platform information:")
@@ -378,24 +416,69 @@ def run_command_start(options):
 
     # start Twisted logging
     #
-    if not options.logdir:
-        logfd = sys.stderr
+    from crossbar._logging import LogLevel, start_logging
+
+    if options.logdir:
+        # We want to log to a file
+        from crossbar._logging import make_legacy_daily_logfile_observer
+
+        log_publisher.addObserver(
+            make_legacy_daily_logfile_observer(options.logdir, options.loglevel))
     else:
-        from twisted.python.logfile import DailyLogFile
-        logfd = DailyLogFile.fromFullPath(os.path.join(options.logdir, 'node.log'))
+        # We want to log to stdout/stderr.
+        from crossbar._logging import make_stdout_observer
+        from crossbar._logging import make_stderr_observer
 
-    from crossbar.twisted.processutil import DefaultSystemFileLogObserver
-    flo = DefaultSystemFileLogObserver(logfd, system="{:<10} {:>6}".format("Controller", os.getpid()))
-    log.startLoggingWithObserver(flo.emit)
+        if options.loglevel == "none":
+            # Do no logging!
+            pass
+        elif options.loglevel == "quiet":
+            # Quiet: Only print warnings and errors to stderr.
+            log_publisher.addObserver(make_stderr_observer(
+                (LogLevel.warn, LogLevel.error,
+                 LogLevel.critical), show_source=False, format=options.logformat))
+        elif options.loglevel == "standard":
+            # Standard: For users of Crossbar
+            log_publisher.addObserver(make_stdout_observer(
+                (LogLevel.info,), show_source=False, format=options.logformat))
+            log_publisher.addObserver(make_stderr_observer(
+                (LogLevel.warn, LogLevel.error,
+                 LogLevel.critical), show_source=False, format=options.logformat))
+        elif options.loglevel == "verbose":
+            # Verbose: for developers
+            # Adds the class source.
+            log_publisher.addObserver(make_stdout_observer(
+                (LogLevel.info, LogLevel.debug), show_source=True,
+                format=options.logformat))
+            log_publisher.addObserver(make_stderr_observer(
+                (LogLevel.warn, LogLevel.error,
+                 LogLevel.critical), show_source=True, format=options.logformat))
+        elif options.loglevel == "trace":
+            # Verbose: for developers
+            # Adds the class source + "trace" output
+            log_publisher.addObserver(make_stdout_observer(
+                (LogLevel.info, LogLevel.debug), show_source=True,
+                format=options.logformat, trace=True))
+            log_publisher.addObserver(make_stderr_observer(
+                (LogLevel.warn, LogLevel.error,
+                 LogLevel.critical), show_source=True, format=options.logformat))
+        else:
+            assert False, "Shouldn't ever get here."
 
-    log.msg("=" * 20 + " Crossbar.io " + "=" * 20 + "\n")
+    # Actually start the logger.
+    start_logging()
 
-    import crossbar
-    log.msg("Crossbar.io {} starting".format(crossbar.__version__))
+    for line in BANNER.splitlines():
+        log.info(click.style(("{:>40}").format(line), fg='yellow', bold=True))
 
-    from twisted.python.reflect import qual
-    log.msg("Running on {} using {} reactor".format(platform.python_implementation(), qual(reactor.__class__).split('.')[-1]))
-    log.msg("Starting from node directory {}".format(options.cbdir))
+    bannerFormat = "{:>12} {:<24}"
+    log.info(bannerFormat.format("Version:", click.style(crossbar.__version__, fg='yellow', bold=True)))
+    # log.info(bannerFormat.format("Python:", click.style(platform.python_implementation(), fg='yellow', bold=True)))
+    # log.info(bannerFormat.format("Reactor:", click.style(qual(reactor.__class__).split('.')[-1], fg='yellow', bold=True)))
+    log.info(bannerFormat.format("Started:", click.style(utcnow(), fg='yellow', bold=True)))
+    log.info()
+
+    log.info("Starting from node directory {}".format(options.cbdir))
 
     # create and start Crossbar.io node
     #
@@ -404,10 +487,10 @@ def run_command_start(options):
     node.start()
 
     try:
-        log.msg("Entering reactor event loop ...")
+        log.info("Entering reactor event loop...")
         reactor.run()
-    except Exception as e:
-        log.msg("Could not start reactor: {0}".format(e))
+    except Exception:
+        log.failure("Could not start reactor: {log_failure.value}")
 
 
 def run_command_restart(options):
@@ -542,9 +625,15 @@ def run(prog=None, args=None):
 
     parser_start.add_argument('--loglevel',
                               type=str,
-                              default='info',
-                              choices=['trace', 'debug', 'info', 'warn', 'error', 'fatal'],
-                              help="Server log level (overrides default 'info')")
+                              default='standard',
+                              choices=['none', 'quiet', 'standard', 'verbose', 'trace'],
+                              help="How much Crossbar.io should log to the terminal, in order of verbosity.")
+
+    parser_start.add_argument('--logformat',
+                              type=str,
+                              default='colour',
+                              choices=['syslogd', 'nocolour', 'colour'],
+                              help="The format of the logs -- suitable for syslogd, not coloured, or coloured.")
 
     # "stop" command
     #

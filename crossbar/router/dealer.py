@@ -39,11 +39,11 @@ from autobahn.wamp.exception import ProtocolError, ApplicationError
 
 from autobahn.wamp.message import _URI_PAT_STRICT_NON_EMPTY, \
     _URI_PAT_LOOSE_NON_EMPTY, _URI_PAT_STRICT_EMPTY, _URI_PAT_LOOSE_EMPTY
-from autobahn.twisted.wamp import FutureMixin
 
 from crossbar.router.observation import UriObservationMap
-from crossbar.router.types import RouterOptions
-from crossbar.router.interfaces import IRouter
+from crossbar.router import RouterOptions, RouterAction
+
+import txaio
 
 __all__ = ('Dealer',)
 
@@ -63,8 +63,7 @@ class RegistrationExtra(object):
         self.roundrobin_current = 0
 
 
-class Dealer(FutureMixin):
-
+class Dealer(object):
     """
     Basic WAMP dealer.
     """
@@ -132,7 +131,7 @@ class Dealer(FutureMixin):
             del self._session_to_registrations[session]
 
         else:
-            raise Exception("session with ID {} not attached".format(session._session_id))
+            raise Exception(u"session with ID {} not attached".format(session._session_id))
 
     def processRegister(self, session, register):
         """
@@ -153,7 +152,7 @@ class Dealer(FutureMixin):
                 uri_is_valid = _URI_PAT_LOOSE_NON_EMPTY.match(register.procedure)
 
         if not uri_is_valid:
-            reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.INVALID_URI, ["register for invalid procedure URI '{0}' (URI strict checking {1})".format(register.procedure, self._option_uri_strict)])
+            reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.INVALID_URI, [u"register for invalid procedure URI '{0}' (URI strict checking {1})".format(register.procedure, self._option_uri_strict)])
             session._transport.send(reply)
             return
 
@@ -161,8 +160,12 @@ class Dealer(FutureMixin):
         # "crossbar." other than for trusted session (that are sessions
         # built into Crossbar.io)
         if session._authrole is not None and session._authrole != u"trusted":
-            if register.procedure.startswith(u"wamp.") or register.procedure.startswith(u"crossbar."):
-                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.INVALID_URI, ["register for restricted procedure URI '{0}')".format(register.procedure)])
+            is_restricted = False
+            is_restricted = is_restricted or register.procedure.startswith(u"wamp.")
+            # FIXME
+            # is_restricted = is_restricted or register.procedure.startswith(u"crossbar.")
+            if is_restricted:
+                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.INVALID_URI, [u"register for restricted procedure URI '{0}')".format(register.procedure)])
                 session._transport.send(reply)
                 return
 
@@ -175,7 +178,7 @@ class Dealer(FutureMixin):
             # on a the given registration
             #
             if registration.extra.invoke == message.Register.INVOKE_SINGLE:
-                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.PROCEDURE_ALREADY_EXISTS, ["register for already registered procedure '{0}'".format(register.procedure)])
+                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.PROCEDURE_ALREADY_EXISTS, [u"register for already registered procedure '{0}'".format(register.procedure)])
                 session._transport.send(reply)
                 return
 
@@ -183,19 +186,19 @@ class Dealer(FutureMixin):
             # requested by the new callee
             #
             if registration.extra.invoke != register.invoke:
-                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.PROCEDURE_EXISTS_INVOCATION_POLICY_CONFLICT, ["register for already registered procedure '{0}' with conflicting invocation policy (has {1} and {2} was requested)".format(register.procedure, registration.extra.invoke, register.invoke)])
+                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.PROCEDURE_EXISTS_INVOCATION_POLICY_CONFLICT, [u"register for already registered procedure '{0}' with conflicting invocation policy (has {1} and {2} was requested)".format(register.procedure, registration.extra.invoke, register.invoke)])
                 session._transport.send(reply)
                 return
 
         # authorize action
         #
-        d = self._as_future(self._router.authorize, session, register.procedure, IRouter.ACTION_REGISTER)
+        d = txaio.as_future(self._router.authorize, session, register.procedure, RouterAction.ACTION_REGISTER)
 
         def on_authorize_success(authorized):
             if not authorized:
                 # error reply since session is not authorized to register
                 #
-                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.NOT_AUTHORIZED, ["session is not authorized to register procedure '{0}'".format(register.procedure)])
+                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.NOT_AUTHORIZED, [u"session is not authorized to register procedure '{0}'".format(register.procedure)])
 
             else:
                 # ok, session authorized to register. now get the registration
@@ -235,10 +238,10 @@ class Dealer(FutureMixin):
             # the call to authorize the action _itself_ failed (note this is different from the
             # call to authorize succeed, but the authorization being denied)
             #
-            reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.AUTHORIZATION_FAILED, ["failed to authorize session for registering procedure '{0}': {1}".format(register.procedure, err.value)])
+            reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.AUTHORIZATION_FAILED, [u"failed to authorize session for registering procedure '{0}': {1}".format(register.procedure, err.value)])
             session._transport.send(reply)
 
-        self._add_future_callbacks(d, on_authorize_success, on_authorize_error)
+        txaio.add_callbacks(d, on_authorize_success, on_authorize_error)
 
     def processUnregister(self, session, unregister):
         """
@@ -316,7 +319,7 @@ class Dealer(FutureMixin):
             uri_is_valid = _URI_PAT_LOOSE_NON_EMPTY.match(call.procedure)
 
         if not uri_is_valid:
-            reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_URI, ["call with invalid procedure URI '{0}' (URI strict checking {1})".format(call.procedure, self._option_uri_strict)])
+            reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_URI, [u"call with invalid procedure URI '{0}' (URI strict checking {1})".format(call.procedure, self._option_uri_strict)])
             session._transport.send(reply)
             return
 
@@ -331,13 +334,13 @@ class Dealer(FutureMixin):
             try:
                 self._router.validate('call', call.procedure, call.args, call.kwargs)
             except Exception as e:
-                reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_ARGUMENT, ["call of procedure '{0}' with invalid application payload: {1}".format(call.procedure, e)])
+                reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_ARGUMENT, [u"call of procedure '{0}' with invalid application payload: {1}".format(call.procedure, e)])
                 session._transport.send(reply)
                 return
 
             # authorize CALL action
             #
-            d = self._as_future(self._router.authorize, session, call.procedure, IRouter.ACTION_CALL)
+            d = txaio.as_future(self._router.authorize, session, call.procedure, RouterAction.ACTION_CALL)
 
             def on_authorize_success(authorized):
 
@@ -345,7 +348,7 @@ class Dealer(FutureMixin):
                 # the action was actually authorized or not ..
                 #
                 if not authorized:
-                    reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NOT_AUTHORIZED, ["session is not authorized to call procedure '{0}'".format(call.procedure)])
+                    reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NOT_AUTHORIZED, [u"session is not authorized to call procedure '{0}'".format(call.procedure)])
                     session._transport.send(reply)
 
                 else:
@@ -370,7 +373,7 @@ class Dealer(FutureMixin):
 
                     else:
                         # should not arrive here
-                        raise Exception("logic error")
+                        raise Exception(u"logic error")
 
                     # new ID for the invocation
                     #
@@ -408,13 +411,13 @@ class Dealer(FutureMixin):
                 # the call to authorize the action _itself_ failed (note this is different from the
                 # call to authorize succeed, but the authorization being denied)
                 #
-                reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.AUTHORIZATION_FAILED, ["failed to authorize session for calling procedure '{0}': {1}".format(call.procedure, err.value)])
+                reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.AUTHORIZATION_FAILED, [u"failed to authorize session for calling procedure '{0}': {1}".format(call.procedure, err.value)])
                 session._transport.send(reply)
 
-            self._add_future_callbacks(d, on_authorize_success, on_authorize_error)
+            txaio.add_callbacks(d, on_authorize_success, on_authorize_error)
 
         else:
-            reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NO_SUCH_PROCEDURE, ["no callee registered for procedure '{0}'".format(call.procedure)])
+            reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NO_SUCH_PROCEDURE, [u"no callee registered for procedure '{0}'".format(call.procedure)])
             session._transport.send(reply)
 
     # noinspection PyUnusedLocal
@@ -445,7 +448,7 @@ class Dealer(FutureMixin):
                 self._router.validate('call_result', invocation_request.call.procedure, yield_.args, yield_.kwargs)
             except Exception as e:
                 is_valid = False
-                reply = message.Error(message.Call.MESSAGE_TYPE, invocation_request.call.request, ApplicationError.INVALID_ARGUMENT, ["call result from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)])
+                reply = message.Error(message.Call.MESSAGE_TYPE, invocation_request.call.request, ApplicationError.INVALID_ARGUMENT, [u"call result from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)])
             else:
                 reply = message.Result(invocation_request.call.request, args=yield_.args, kwargs=yield_.kwargs, progress=yield_.progress)
 
@@ -460,7 +463,7 @@ class Dealer(FutureMixin):
                 del self._invocations[yield_.request]
 
         else:
-            raise ProtocolError("Dealer.onYield(): YIELD received for non-pending request ID {0}".format(yield_.request))
+            raise ProtocolError(u"Dealer.onYield(): YIELD received for non-pending request ID {0}".format(yield_.request))
 
     def processInvocationError(self, session, error):
         """
@@ -479,7 +482,7 @@ class Dealer(FutureMixin):
             try:
                 self._router.validate('call_error', invocation_request.call.procedure, error.args, error.kwargs)
             except Exception as e:
-                reply = message.Error(message.Call.MESSAGE_TYPE, invocation_request.call.request, ApplicationError.INVALID_ARGUMENT, ["call error from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)])
+                reply = message.Error(message.Call.MESSAGE_TYPE, invocation_request.call.request, ApplicationError.INVALID_ARGUMENT, [u"call error from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)])
             else:
                 reply = message.Error(message.Call.MESSAGE_TYPE, invocation_request.call.request, error.error, args=error.args, kwargs=error.kwargs)
 
@@ -493,4 +496,4 @@ class Dealer(FutureMixin):
             del self._invocations[error.request]
 
         else:
-            raise ProtocolError("Dealer.onInvocationError(): ERROR received for non-pending request_type {0} and request ID {1}".format(error.request_type, error.request))
+            raise ProtocolError(u"Dealer.onInvocationError(): ERROR received for non-pending request_type {0} and request ID {1}".format(error.request_type, error.request))

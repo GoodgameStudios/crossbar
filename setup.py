@@ -67,6 +67,7 @@ extras_require_system = [
     'psutil>=2.1.3',        # BSD license
 ]
 if sys.platform.startswith('linux'):
+    extras_require_system.append('setproctitle>=1.1.8')  # BSD license
     extras_require_system.append('pyinotify>=0.9.4')  # MIT license
 if 'bsd' in sys.platform or sys.platform.startswith('darwin'):
     extras_require_system.append('setproctitle>=1.1.8')  # BSD license
@@ -99,8 +100,14 @@ extras_require_accelerate = [
     "ujson>=1.33"           # BSD License
 ] if CPY else []  # only for CPy (skip for PyPy)!
 
-extras_require_all = extras_require_system + extras_require_db + extras_require_manhole + \
-    extras_require_msgpack + extras_require_tls + extras_require_accelerate
+# Extra requirements which enhance the development experience
+extras_require_dev = [
+    "colorama>=0.3.3"       # BSD license
+]
+
+extras_require_all = extras_require_system + extras_require_db + \
+    extras_require_manhole + extras_require_msgpack + extras_require_tls + \
+    extras_require_accelerate + extras_require_dev
 
 
 setup(
@@ -113,10 +120,11 @@ setup(
     url='http://crossbar.io/',
     platforms=('Any'),
     install_requires=[
+        'click>=4.0',                 # BSD license
         'setuptools>=2.2',            # Python Software Foundation license
         'zope.interface>=3.6.0',      # Zope Public license
-        'twisted>=twisted-13.2',      # MIT license
-        'autobahn[twisted]>=0.10.2',  # MIT license
+        'twisted>=15.2.1',            # MIT license
+        'autobahn[twisted]>=0.10.3',  # MIT license
         'netaddr>=0.7.11',            # BSD license
         'pytrie>=0.2',                # BSD license
         'jinja2>=2.7.2',              # BSD license
@@ -129,6 +137,7 @@ setup(
     extras_require={
         'all': extras_require_all,
         'db': extras_require_db,
+        'dev': extras_require_dev,
         'tls': extras_require_tls,
         'manhole': extras_require_manhole,
         'msgpack': extras_require_msgpack,

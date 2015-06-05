@@ -48,10 +48,11 @@ from autobahn.wamp import types
 from autobahn.wamp import message
 from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.protocol import BaseSession
-from autobahn.twisted.wamp import FutureMixin
 from autobahn.wamp.exception import ProtocolError, SessionNotReady
 from autobahn.wamp.types import SessionDetails
 from autobahn.wamp.interfaces import ITransportHandler
+
+import txaio
 
 from crossbar.router.auth import PendingAuthPersona, \
     PendingAuthWampCra, \
@@ -60,12 +61,11 @@ from crossbar.router.auth import PendingAuthPersona, \
 
 
 __all__ = (
-    'CrossbarRouterSessionFactory',
-    'CrossbarRouterFactory',
+    'RouterSessionFactory',
 )
 
 
-class RouterApplicationSession:
+class _RouterApplicationSession:
 
     """
     Wraps an application session to run directly attached to a WAMP router (broker+dealer).
@@ -153,7 +153,7 @@ class RouterApplicationSession:
                                      self._session._authid, self._session._authrole, self._session._authmethod,
                                      self._session._authprovider)
 
-            self._session._as_future(self._session.onJoin, details)
+            txaio.as_future(self._session.onJoin, details)
             # self._session.onJoin(details)
 
         # app-to-router
@@ -202,8 +202,7 @@ class RouterApplicationSession:
             raise Exception("RouterApplicationSession.send: unhandled message {0}".format(msg))
 
 
-class RouterSession(FutureMixin, BaseSession):
-
+class _RouterSession(BaseSession):
     """
     WAMP router session. This class implements :class:`autobahn.wamp.interfaces.ITransportHandler`.
     """
@@ -284,7 +283,7 @@ class RouterSession(FutureMixin, BaseSession):
 
                 details = types.HelloDetails(msg.roles, msg.authmethods, msg.authid, self._pending_session_id)
 
-                d = self._as_future(self.onHello, self._realm, details)
+                d = txaio.as_future(self.onHello, self._realm, details)
 
                 def success(res):
                     msg = None
@@ -304,11 +303,11 @@ class RouterSession(FutureMixin, BaseSession):
                     if msg:
                         self._transport.send(msg)
 
-                self._add_future_callbacks(d, success, self._onError)
+                txaio.add_callbacks(d, success, self._onError)
 
             elif isinstance(msg, message.Authenticate):
 
-                d = self._as_future(self.onAuthenticate, msg.signature, {})
+                d = txaio.as_future(self.onAuthenticate, msg.signature, {})
 
                 def success(res):
                     msg = None
@@ -325,7 +324,7 @@ class RouterSession(FutureMixin, BaseSession):
                     if msg:
                         self._transport.send(msg)
 
-                self._add_future_callbacks(d, success, self._onError)
+                txaio.add_callbacks(d, success, self._onError)
 
             elif isinstance(msg, message.Abort):
 
@@ -440,16 +439,15 @@ class RouterSession(FutureMixin, BaseSession):
             print("Catched exception during message processing: {0}".format(err.getTraceback()))  # replace with proper logging
 
 
-ITransportHandler.register(RouterSession)
+ITransportHandler.register(_RouterSession)
 
 
-class RouterSessionFactory(FutureMixin):
-
+class _RouterSessionFactory(object):
     """
     WAMP router session factory.
     """
 
-    session = RouterSession
+    session = _RouterSession
     """
    WAMP router session class to be used in this factory.
    """
@@ -470,7 +468,7 @@ class RouterSessionFactory(FutureMixin):
         :param: session: A WAMP application session.
         :type session: A instance of a class that derives of :class:`autobahn.wamp.protocol.WampAppSession`
         """
-        self._app_sessions[session] = RouterApplicationSession(session, self._routerFactory, authid, authrole)
+        self._app_sessions[session] = _RouterApplicationSession(session, self._routerFactory, authid, authrole)
 
     def remove(self, session):
         """
@@ -492,7 +490,7 @@ class RouterSessionFactory(FutureMixin):
         return session
 
 
-class CrossbarRouterSession(RouterSession):
+class RouterSession(_RouterSession):
 
     """
     Router-side of (non-embedded) Crossbar.io WAMP sessions.
@@ -502,7 +500,7 @@ class CrossbarRouterSession(RouterSession):
         """
         Implements :func:`autobahn.wamp.interfaces.ITransportHandler.onOpen`
         """
-        RouterSession.onOpen(self, transport)
+        _RouterSession.onOpen(self, transport)
 
         if hasattr(self._transport, 'factory') and hasattr(self._transport.factory, '_config'):
             self._transport_config = self._transport.factory._config
@@ -1060,13 +1058,15 @@ class CrossbarRouterSession(RouterSession):
 
         # dispatch session metaevent from WAMP AP
         #
-        self._service_session.publish(u'wamp.session.on_join', self._session_details)
+        if self._service_session:
+            self._service_session.publish(u'wamp.session.on_join', self._session_details)
 
     def onLeave(self, details):
 
         # dispatch session metaevent from WAMP AP
         #
-        self._service_session.publish(u'wamp.session.on_leave', self._session_id)
+        if self._service_session:
+            self._service_session.publish(u'wamp.session.on_leave', self._session_id)
 
         self._session_details = None
 
@@ -1085,10 +1085,10 @@ class CrossbarRouterSession(RouterSession):
                     proto.sendClose()
 
 
-class CrossbarRouterSessionFactory(RouterSessionFactory):
+class RouterSessionFactory(_RouterSessionFactory):
 
     """
     Factory creating the router side of (non-embedded) Crossbar.io WAMP sessions.
     This is the session factory that will given to router transports.
     """
-    session = CrossbarRouterSession
+    session = RouterSession
